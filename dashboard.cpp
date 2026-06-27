@@ -55,6 +55,7 @@ const char* kDashboardHtml = R"HTML(<!doctype html>
     <div class="card">
       <div class="label">Temperature</div>
       <div class="value"><span id="t">--</span><span class="unit"> &deg;C</span></div>
+      <div id="tpill" class="pill">--</div>
     </div>
   </div>
 
@@ -63,7 +64,7 @@ const char* kDashboardHtml = R"HTML(<!doctype html>
     <svg id="humChart" preserveAspectRatio="none"></svg>
   </div>
   <div class="chart-wrap">
-    <h2>Temperature (&deg;C)</h2>
+    <h2>Temperature (&deg;C) &mdash; dashed: allowable &middot; dotted: critical</h2>
     <svg id="tempChart" preserveAspectRatio="none"></svg>
   </div>
 
@@ -81,12 +82,18 @@ let cfg = null;
 // (no horizontal stretch -> axis text and dashes render undistorted).
 function chartW(svg){ return Math.max(320, Math.round(svg.clientWidth || svg.parentNode.clientWidth || 800)); }
 
-function classify(h){
-  if(h==null) return null;
-  if(h < cfg.hum_crit_low || h > cfg.hum_crit_high) return 'critical';
-  if(h < cfg.hum_subopt_low || h > cfg.hum_subopt_high) return 'suboptimal';
+// Three-band classify shared by humidity and temperature. Returns a CSS class
+// name ('optimal'|'suboptimal'|'critical'); the displayed label can differ.
+function classify(v, critLo, suboptLo, suboptHi, critHi){
+  if(v==null) return null;
+  if(v < critLo || v > critHi) return 'critical';
+  if(v < suboptLo || v > suboptHi) return 'suboptimal';
   return 'optimal';
 }
+function classifyHum(h){ return classify(h, cfg.hum_crit_low, cfg.hum_subopt_low, cfg.hum_subopt_high, cfg.hum_crit_high); }
+function classifyTemp(t){ return classify(t, cfg.temp_crit_low, cfg.temp_subopt_low, cfg.temp_subopt_high, cfg.temp_crit_high); }
+// Friendly pill labels (middle band is "allowable" rather than the CSS class name).
+const PILL_LABEL = { optimal:'optimal', suboptimal:'allowable', critical:'critical' };
 
 // Build an SVG line that breaks at null gaps (sensor errors).
 function linePath(vals, min, max, W){
@@ -141,12 +148,19 @@ function renderTemp(vals){
   const W=chartW(svg);
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
   const real=vals.filter(v=>v!=null);
-  if(!real.length){ svg.innerHTML=""; return; }
-  let dmin=Math.min(...real), dmax=Math.max(...real), mid=(dmin+dmax)/2;
+  // Keep the critical bounds in view so the threshold lines are always visible,
+  // even before any data has arrived.
+  let lo = Math.min(cfg.temp_crit_low,  real.length?Math.min(...real):cfg.temp_crit_low)-1;
+  let hi = Math.max(cfg.temp_crit_high, real.length?Math.max(...real):cfg.temp_crit_high)+1;
   // enforce a minimum visible range so a ~1C wiggle doesn't fill the chart
-  let half=Math.max((dmax-dmin)/2, MIN_TEMP_RANGE/2)+0.5;
-  let lo=mid-half, hi=mid+half;
-  let parts=axisLabels(lo,hi);
+  if(hi-lo < MIN_TEMP_RANGE){ const mid=(lo+hi)/2; lo=mid-MIN_TEMP_RANGE/2; hi=mid+MIN_TEMP_RANGE/2; }
+  let parts="";
+  parts += band(cfg.temp_subopt_low, cfg.temp_subopt_high, lo, hi, "rgba(63,185,80,0.08)", W);
+  parts += hline(cfg.temp_subopt_low,  lo, hi, "#d29922", "6 4", W);
+  parts += hline(cfg.temp_subopt_high, lo, hi, "#d29922", "6 4", W);
+  parts += hline(cfg.temp_crit_low,  lo, hi, "#f85149", "2 4", W);
+  parts += hline(cfg.temp_crit_high, lo, hi, "#f85149", "2 4", W);
+  parts += axisLabels(lo,hi);
   const d=linePath(vals, lo, hi, W);
   if(d) parts += `<path d="${d}" fill="none" stroke="#f0883e" stroke-width="2"/>`;
   svg.innerHTML=parts;
@@ -158,11 +172,14 @@ async function tick(){
     const d = await (await fetch('/api/latest')).json();
     const st=document.getElementById('status');
     const hpill=document.getElementById('hpill');
+    const tpill=document.getElementById('tpill');
     if(d.ok && d.status==='ok'){
       document.getElementById('h').textContent=d.humidity.toFixed(1);
       document.getElementById('t').textContent=d.temperature.toFixed(1);
-      const cls=classify(d.humidity);
-      hpill.textContent=cls; hpill.className='pill '+cls;
+      const hcls=classifyHum(d.humidity);
+      hpill.textContent=PILL_LABEL[hcls]; hpill.className='pill '+hcls;
+      const tcls=classifyTemp(d.temperature);
+      tpill.textContent=PILL_LABEL[tcls]; tpill.className='pill '+tcls;
       const ageS=Math.round(d.age_ms/1000);
       const stale=d.age_ms>8000;
       st.textContent = stale ? ('stale ('+ageS+'s old)') : ('live, '+ageS+'s ago');
@@ -171,6 +188,7 @@ async function tick(){
       document.getElementById('h').textContent='--';
       document.getElementById('t').textContent='--';
       hpill.textContent='sensor error'; hpill.className='pill critical';
+      tpill.textContent='sensor error'; tpill.className='pill critical';
       st.textContent='connected, sensor read error';
       st.className='err';
     } else {

@@ -50,6 +50,8 @@ struct Config {
     long long   window_ms  = 6LL * 3600 * 1000;
     double hum_crit_low    = 30, hum_subopt_low  = 40;
     double hum_subopt_high = 60, hum_crit_high   = 70;
+    double temp_crit_low    = 16, temp_subopt_low  = 18;
+    double temp_subopt_high = 24, temp_crit_high   = 28;
 };
 
 static std::string trim(const std::string& s) {
@@ -94,6 +96,10 @@ static Config loadConfig(const std::string& path) {
         else if (k == "hum_subopt_low")  c.hum_subopt_low  = std::stod(v);
         else if (k == "hum_subopt_high") c.hum_subopt_high = std::stod(v);
         else if (k == "hum_crit_high")   c.hum_crit_high   = std::stod(v);
+        else if (k == "temp_crit_low")    c.temp_crit_low    = std::stod(v);
+        else if (k == "temp_subopt_low")  c.temp_subopt_low  = std::stod(v);
+        else if (k == "temp_subopt_high") c.temp_subopt_high = std::stod(v);
+        else if (k == "temp_crit_high")   c.temp_crit_high   = std::stod(v);
     }
     std::cerr << "[config] loaded from " << path << "\n";
     return c;
@@ -299,6 +305,8 @@ static std::string jsonConfig(const Config& c) {
     std::ostringstream os;
     os << "{\"hum_crit_low\":"<<c.hum_crit_low<<",\"hum_subopt_low\":"<<c.hum_subopt_low
        << ",\"hum_subopt_high\":"<<c.hum_subopt_high<<",\"hum_crit_high\":"<<c.hum_crit_high
+       << ",\"temp_crit_low\":"<<c.temp_crit_low<<",\"temp_subopt_low\":"<<c.temp_subopt_low
+       << ",\"temp_subopt_high\":"<<c.temp_subopt_high<<",\"temp_crit_high\":"<<c.temp_crit_high
        << ",\"window_ms\":"<<c.window_ms<<"}";
     return os.str();
 }

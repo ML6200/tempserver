@@ -1,0 +1,19 @@
+[Unit]
+Description=AM2302 DHT serial-to-dashboard server
+After=network.target
+
+[Service]
+# Adjust the path to wherever you put the binary.
+ExecStart=/opt/dht-dashboard/dht_server
+Restart=always
+RestartSec=3
+# The user must be in the 'dialout' group to read the serial port.
+User=dht
+Group=dialout
+# Optional hardening:
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/dht-dashboard
+
+[Install]
+WantedBy=multi-user.target

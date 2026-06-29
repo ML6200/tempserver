@@ -184,7 +184,9 @@ async function tick(){
       const stale=d.age_ms>8000;
       st.textContent = stale ? ('stale ('+ageS+'s old)') : ('live, '+ageS+'s ago');
       st.className = stale ? 'stale' : '';
-    } else if(d.ok && d.status==='error'){
+    }
+else if(d.ok && d.status==='error')
+{
       document.getElementById('h').textContent='--';
       document.getElementById('t').textContent='--';
       hpill.textContent='sensor error'; hpill.className='pill critical';

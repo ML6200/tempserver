@@ -185,6 +185,10 @@
             .pill.optimal {
                 color: var(--green);
             }
+            .pill.normal {
+                color: #6fd6c4;
+                text-shadow: 0 0 6px rgba(111, 214, 196, 0.5);
+            }
             .pill.warning {
                 color: var(--amber);
                 text-shadow: 0 0 6px rgba(216, 193, 90, 0.5);
@@ -277,15 +281,15 @@
 
             <div class="panel">
                 <h2>
-                    Humidity (%RH) &mdash; dashed: warning &middot; dotted:
-                    critical
+                    Humidity (%RH) &mdash; solid: optimal &middot; dashed:
+                    warning &middot; dotted: critical
                 </h2>
                 <svg id="humChart" preserveAspectRatio="none"></svg>
             </div>
             <div class="panel">
                 <h2>
-                    Temperature (&deg;C) &mdash; dashed: warning &middot;
-                    dotted: critical
+                    Temperature (&deg;C) &mdash; solid: optimal &middot; dashed:
+                    warning &middot; dotted: critical
                 </h2>
                 <svg id="tempChart" preserveAspectRatio="none"></svg>
             </div>
@@ -322,10 +326,19 @@
             // Three-band classify shared by humidity and temperature. Returns a CSS class
             // name ('optimal'|'warning'|'critical'); these match both the .pill.* CSS
             // classes and the keys the server emits (*_warning_*, *_crit_*).
-            function classify(v, critLo, warningLo, warningHi, critHi) {
+            function classify(
+                v,
+                critLo,
+                warningLo,
+                optLo,
+                optHi,
+                warningHi,
+                critHi,
+            ) {
                 if (v == null) return null;
                 if (v < critLo || v > critHi) return "critical";
                 if (v < warningLo || v > warningHi) return "warning";
+                if (v < optLo || v > optHi) return "normal";
                 return "optimal";
             }
             function classifyHum(h) {
@@ -333,6 +346,8 @@
                     h,
                     cfg.hum_crit_low,
                     cfg.hum_warning_low,
+                    cfg.hum_optimal_low,
+                    cfg.hum_optimal_high,
                     cfg.hum_warning_high,
                     cfg.hum_crit_high,
                 );
@@ -342,6 +357,8 @@
                     t,
                     cfg.temp_crit_low,
                     cfg.temp_warning_low,
+                    cfg.temp_optimal_low,
+                    cfg.temp_optimal_high,
                     cfg.temp_warning_high,
                     cfg.temp_crit_high,
                 );
@@ -349,6 +366,7 @@
             // Display labels for each band (currently identical to the class names).
             const PILL_LABEL = {
                 optimal: "optimal",
+                normal: "normal",
                 warning: "warning",
                 critical: "critical",
             };
@@ -419,6 +437,16 @@
                     "rgba(78,230,168,0.07)",
                     W,
                 );
+                parts += band(
+                    cfg.hum_optimal_low,
+                    cfg.hum_optimal_high,
+                    lo,
+                    hi,
+                    "rgba(78,230,168,0.18)",
+                    W,
+                );
+                parts += hline(cfg.hum_optimal_low, lo, hi, "#4ee6a8", "0", W);
+                parts += hline(cfg.hum_optimal_high, lo, hi, "#4ee6a8", "0", W);
                 parts += hline(
                     cfg.hum_warning_low,
                     lo,
@@ -475,6 +503,16 @@
                     "rgba(78,230,168,0.07)",
                     W,
                 );
+                parts += band(
+                    cfg.temp_optimal_low,
+                    cfg.temp_optimal_high,
+                    lo,
+                    hi,
+                    "rgba(78,230,168,0.18)",
+                    W,
+                );
+                parts += hline(cfg.temp_optimal_low, lo, hi, "#4ee6a8", "0", W);
+                parts += hline(cfg.temp_optimal_high, lo, hi, "#4ee6a8", "0", W);
                 parts += hline(
                     cfg.temp_warning_low,
                     lo,

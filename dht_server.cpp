@@ -54,13 +54,17 @@ struct Config
 
   double hum_crit_low = 30;
   double hum_warning_low = 40;
+  double hum_optimal_low = 45;
+  double hum_optimal_high = 55;
   double hum_warning_high = 60;
   double hum_crit_high = 70;
 
   double temp_crit_low = 16;
   double temp_warning_low = 18;
-  double temp_warning_high = 24;
-  double temp_crit_high = 28;
+  double temp_optimal_low = 20;
+  double temp_optimal_high = 24;
+  double temp_warning_high = 33;
+  double temp_crit_high = 34;
 };
 
 static std::string trim(const std::string &s)
@@ -146,6 +150,10 @@ static Config loadConfig(const std::string &path)
       c.hum_crit_low = std::stod(v);
     else if (k == "hum_warning_low")
       c.hum_warning_low = std::stod(v);
+    else if (k == "hum_optimal_low")
+      c.hum_optimal_low = std::stod(v);
+    else if (k == "hum_optimal_high")
+      c.hum_optimal_high = std::stod(v);
     else if (k == "hum_warning_high")
       c.hum_warning_high = std::stod(v);
     else if (k == "hum_crit_high")
@@ -154,6 +162,10 @@ static Config loadConfig(const std::string &path)
       c.temp_crit_low = std::stod(v);
     else if (k == "temp_warning_low")
       c.temp_warning_low = std::stod(v);
+    else if (k == "temp_optimal_low")
+      c.temp_optimal_low = std::stod(v);
+    else if (k == "temp_optimal_high")
+      c.temp_optimal_high = std::stod(v);
     else if (k == "temp_warning_high")
       c.temp_warning_high = std::stod(v);
     else if (k == "temp_crit_high")
@@ -623,10 +635,14 @@ static std::string jsonConfig(const Config &c)
   std::ostringstream os;
   os << "{\"hum_crit_low\":" << c.hum_crit_low
      << ",\"hum_warning_low\":" << c.hum_warning_low
+     << ",\"hum_optimal_low\":" << c.hum_optimal_low
+     << ",\"hum_optimal_high\":" << c.hum_optimal_high
      << ",\"hum_warning_high\":" << c.hum_warning_high
      << ",\"hum_crit_high\":" << c.hum_crit_high
      << ",\"temp_crit_low\":" << c.temp_crit_low
      << ",\"temp_warning_low\":" << c.temp_warning_low
+     << ",\"temp_optimal_low\":" << c.temp_optimal_low
+     << ",\"temp_optimal_high\":" << c.temp_optimal_high
      << ",\"temp_warning_high\":" << c.temp_warning_high
      << ",\"temp_crit_high\":" << c.temp_crit_high
      << ",\"window_ms\":" << c.window_ms << "}";

@@ -49,6 +49,7 @@ struct Config
   std::string serial_port;
   int http_port = 8080;
   std::string log_file = "readings.csv";
+  std::string hsrc = "dashboard.html";
   long long window_ms = 6LL * 3600 * 1000;
 
   double hum_crit_low = 30;
@@ -695,6 +696,7 @@ static void httpLoop(DataStore &store, const Config &cfg,
     req[n] = 0;
 
     std::string path = parseRequestPath(req);
+    std::string kDashboardHtml = readFileToString(cfg.hsrc);
 
     if (path == "/" || path == "/index.html")
       httpRespond(cfd, "200 OK", "text/html; charset=utf-8", kDashboardHtml);

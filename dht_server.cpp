@@ -8,7 +8,7 @@
 //   - Recognizes "nan,nan" from the sketch as a sensor-read error: recorded
 //     with status "error" and surfaced as "connected, sensor read error".
 //   - Two stacked charts (humidity, temperature). Humidity chart draws dashed
-//     threshold lines for the suboptimal/critical bounds from the config.
+//     threshold lines for the warningimal/critical bounds from the config.
 //   - /api/export streams the full CSV log for download.
 //
 // Build:  g++ -std=c++17 -O2 -pthread dht_server.cpp -o dht_server
@@ -52,13 +52,13 @@ struct Config
   long long window_ms = 6LL * 3600 * 1000;
 
   double hum_crit_low = 30;
-  double hum_subopt_low = 40;
-  double hum_subopt_high = 60;
+  double hum_warning_low = 40;
+  double hum_warning_high = 60;
   double hum_crit_high = 70;
 
   double temp_crit_low = 16;
-  double temp_subopt_low = 18;
-  double temp_subopt_high = 24;
+  double temp_warning_low = 18;
+  double temp_warning_high = 24;
   double temp_crit_high = 28;
 };
 
@@ -143,18 +143,18 @@ static Config loadConfig(const std::string &path)
       c.window_ms = parseDuration(v);
     else if (k == "hum_crit_low")
       c.hum_crit_low = std::stod(v);
-    else if (k == "hum_subopt_low")
-      c.hum_subopt_low = std::stod(v);
-    else if (k == "hum_subopt_high")
-      c.hum_subopt_high = std::stod(v);
+    else if (k == "hum_warning_low")
+      c.hum_warning_low = std::stod(v);
+    else if (k == "hum_warning_high")
+      c.hum_warning_high = std::stod(v);
     else if (k == "hum_crit_high")
       c.hum_crit_high = std::stod(v);
     else if (k == "temp_crit_low")
       c.temp_crit_low = std::stod(v);
-    else if (k == "temp_subopt_low")
-      c.temp_subopt_low = std::stod(v);
-    else if (k == "temp_subopt_high")
-      c.temp_subopt_high = std::stod(v);
+    else if (k == "temp_warning_low")
+      c.temp_warning_low = std::stod(v);
+    else if (k == "temp_warning_high")
+      c.temp_warning_high = std::stod(v);
     else if (k == "temp_crit_high")
       c.temp_crit_high = std::stod(v);
   }
@@ -253,7 +253,9 @@ public:
   std::vector<Reading> window()
   {
     std::lock_guard<std::mutex> lk(mtx_);
-    return {window_.begin(), window_.end()};
+    return {
+        window_.begin(),
+        window_.end()};
   }
 
   std::string logPath() const { return logPath_; }
@@ -619,12 +621,12 @@ static std::string jsonConfig(const Config &c)
 {
   std::ostringstream os;
   os << "{\"hum_crit_low\":" << c.hum_crit_low
-     << ",\"hum_subopt_low\":" << c.hum_subopt_low
-     << ",\"hum_subopt_high\":" << c.hum_subopt_high
+     << ",\"hum_warning_low\":" << c.hum_warning_low
+     << ",\"hum_warning_high\":" << c.hum_warning_high
      << ",\"hum_crit_high\":" << c.hum_crit_high
      << ",\"temp_crit_low\":" << c.temp_crit_low
-     << ",\"temp_subopt_low\":" << c.temp_subopt_low
-     << ",\"temp_subopt_high\":" << c.temp_subopt_high
+     << ",\"temp_warning_low\":" << c.temp_warning_low
+     << ",\"temp_warning_high\":" << c.temp_warning_high
      << ",\"temp_crit_high\":" << c.temp_crit_high
      << ",\"window_ms\":" << c.window_ms << "}";
   return os.str();

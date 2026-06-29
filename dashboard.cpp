@@ -1,8 +1,8 @@
 // dashboard.cpp — the embedded dashboard HTML/JS, kept separate from server logic.
 // Two stacked charts (humidity + temperature). The humidity chart overlays
-// dashed threshold lines (suboptimal/critical) pulled from /api/config, and
+// dashed threshold lines (warningimal/critical) pulled from /api/config, and
 // shades the optimal band. Sensor-error points (null) leave a gap in the line.
-const char* kDashboardHtml = R"HTML(<!doctype html>
+const char *kDashboardHtml = R"HTML(<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -27,7 +27,7 @@ const char* kDashboardHtml = R"HTML(<!doctype html>
   .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:11px;
           font-weight:600; margin-top:6px; }
   .pill.optimal   { background:#1b3a23; color:#3fb950; }
-  .pill.suboptimal{ background:#3a2f12; color:#d29922; }
+  .pill.warningimal{ background:#3a2f12; color:#d29922; }
   .pill.critical  { background:#3a1518; color:#f85149; }
   .chart-wrap { padding:8px 24px; }
   .chart-wrap h2 { font-size:13px; font-weight:600; color:#adbac7; margin:8px 0 4px; }
@@ -60,7 +60,7 @@ const char* kDashboardHtml = R"HTML(<!doctype html>
   </div>
 
   <div class="chart-wrap">
-    <h2>Humidity (%RH) &mdash; dashed: suboptimal &middot; dotted: critical</h2>
+    <h2>Humidity (%RH) &mdash; dashed: warningimal &middot; dotted: critical</h2>
     <svg id="humChart" preserveAspectRatio="none"></svg>
   </div>
   <div class="chart-wrap">
@@ -83,17 +83,17 @@ let cfg = null;
 function chartW(svg){ return Math.max(320, Math.round(svg.clientWidth || svg.parentNode.clientWidth || 800)); }
 
 // Three-band classify shared by humidity and temperature. Returns a CSS class
-// name ('optimal'|'suboptimal'|'critical'); the displayed label can differ.
-function classify(v, critLo, suboptLo, suboptHi, critHi){
+// name ('optimal'|'warningimal'|'critical'); the displayed label can differ.
+function classify(v, critLo, warningLo, warningHi, critHi){
   if(v==null) return null;
   if(v < critLo || v > critHi) return 'critical';
-  if(v < suboptLo || v > suboptHi) return 'suboptimal';
+  if(v < warningLo || v > warningHi) return 'warningimal';
   return 'optimal';
 }
-function classifyHum(h){ return classify(h, cfg.hum_crit_low, cfg.hum_subopt_low, cfg.hum_subopt_high, cfg.hum_crit_high); }
-function classifyTemp(t){ return classify(t, cfg.temp_crit_low, cfg.temp_subopt_low, cfg.temp_subopt_high, cfg.temp_crit_high); }
+function classifyHum(h){ return classify(h, cfg.hum_crit_low, cfg.hum_warning_low, cfg.hum_warning_high, cfg.hum_crit_high); }
+function classifyTemp(t){ return classify(t, cfg.temp_crit_low, cfg.temp_warning_low, cfg.temp_warning_high, cfg.temp_crit_high); }
 // Friendly pill labels (middle band is "allowable" rather than the CSS class name).
-const PILL_LABEL = { optimal:'optimal', suboptimal:'allowable', critical:'critical' };
+const PILL_LABEL = { optimal:'optimal', warningimal:'allowable', critical:'critical' };
 
 // Build an SVG line that breaks at null gaps (sensor errors).
 function linePath(vals, min, max, W){
@@ -133,9 +133,9 @@ function renderHum(vals){
   let lo = Math.min(cfg.hum_crit_low, real.length?Math.min(...real):cfg.hum_crit_low)-MIN_HUM_PAD;
   let hi = Math.max(cfg.hum_crit_high, real.length?Math.max(...real):cfg.hum_crit_high)+MIN_HUM_PAD;
   let parts="";
-  parts += band(cfg.hum_subopt_low, cfg.hum_subopt_high, lo, hi, "rgba(63,185,80,0.08)", W);
-  parts += hline(cfg.hum_subopt_low,  lo, hi, "#d29922", "6 4", W);
-  parts += hline(cfg.hum_subopt_high, lo, hi, "#d29922", "6 4", W);
+  parts += band(cfg.hum_warning_low, cfg.hum_warning_high, lo, hi, "rgba(63,185,80,0.08)", W);
+  parts += hline(cfg.hum_warning_low,  lo, hi, "#d29922", "6 4", W);
+  parts += hline(cfg.hum_warning_high, lo, hi, "#d29922", "6 4", W);
   parts += hline(cfg.hum_crit_low,  lo, hi, "#f85149", "2 4", W);
   parts += hline(cfg.hum_crit_high, lo, hi, "#f85149", "2 4", W);
   parts += axisLabels(lo,hi);
@@ -155,9 +155,9 @@ function renderTemp(vals){
   // enforce a minimum visible range so a ~1C wiggle doesn't fill the chart
   if(hi-lo < MIN_TEMP_RANGE){ const mid=(lo+hi)/2; lo=mid-MIN_TEMP_RANGE/2; hi=mid+MIN_TEMP_RANGE/2; }
   let parts="";
-  parts += band(cfg.temp_subopt_low, cfg.temp_subopt_high, lo, hi, "rgba(63,185,80,0.08)", W);
-  parts += hline(cfg.temp_subopt_low,  lo, hi, "#d29922", "6 4", W);
-  parts += hline(cfg.temp_subopt_high, lo, hi, "#d29922", "6 4", W);
+  parts += band(cfg.temp_warning_low, cfg.temp_warning_high, lo, hi, "rgba(63,185,80,0.08)", W);
+  parts += hline(cfg.temp_warning_low,  lo, hi, "#d29922", "6 4", W);
+  parts += hline(cfg.temp_warning_high, lo, hi, "#d29922", "6 4", W);
   parts += hline(cfg.temp_crit_low,  lo, hi, "#f85149", "2 4", W);
   parts += hline(cfg.temp_crit_high, lo, hi, "#f85149", "2 4", W);
   parts += axisLabels(lo,hi);

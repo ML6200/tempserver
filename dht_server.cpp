@@ -331,7 +331,7 @@ class DataStore
 // Serial
 // ===========================================================================
 
-static bool nameLooksLikeArduino(const std::string &s)y
+static bool nameLooksLikeArduino(const std::string &s)
 {
     std::string l;
     for (char c : s)

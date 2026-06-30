@@ -145,6 +145,18 @@ static Config loadConfig(const std::string &path)
             c.temp_warning_high = std::stod(v);
         else if (k == "temp_crit_high")
             c.temp_crit_high = std::stod(v);
+        else if (k == "fan_enabled")
+            c.fan_enabled = (v == "1" || v == "true" || v == "yes" || v == "on");
+        else if (k == "fan_on_temp")
+            c.fan_on_temp = std::stod(v);
+        else if (k == "fan_full_temp")
+            c.fan_full_temp = std::stod(v);
+        else if (k == "fan_min_duty")
+            c.fan_min_duty = std::stoi(v);
+        else if (k == "fan_max_duty")
+            c.fan_max_duty = std::stoi(v);
+        else if (k == "fan_hysteresis")
+            c.fan_hysteresis = std::stod(v);
     }
 
     std::cerr << "[config] loaded from " << path << "\n";
@@ -250,6 +262,10 @@ class DataStore
 
     std::string logPath() const { return logPath_; }
 
+    // Last fan duty (0-255) the server commanded, or -1 if none yet sent.
+    void setFanDuty(int d) { fanDuty_.store(d); }
+    int fanDuty() const { return fanDuty_.load(); }
+
   private:
     void trimWindow()
     {
@@ -325,7 +341,46 @@ class DataStore
     std::ofstream out_;
     std::optional<Reading> latest_;
     std::deque<Reading> window_;
+    std::atomic<int> fanDuty_{-1};
 };
+
+// ===========================================================================
+// Fan control
+// ===========================================================================
+
+// Map a temperature to a PWM duty (0-255) using the config's fan curve.
+// prevDuty (the last commanded duty) drives turn-off hysteresis: once the fan
+// is running it keeps running until temperature falls below
+// (fan_on_temp - fan_hysteresis), avoiding on/off chatter at the threshold.
+static int fanDutyForTemp(const Config &c, double temp, int prevDuty)
+{
+    if (!c.fan_enabled)
+        return 0;
+
+    double onTemp = c.fan_on_temp;
+    if (prevDuty > 0) // already running -> apply hysteresis to the turn-off point
+        onTemp -= c.fan_hysteresis;
+
+    if (temp <= onTemp)
+        return 0;
+    if (temp >= c.fan_full_temp)
+        return c.fan_max_duty;
+
+    double span = c.fan_full_temp - c.fan_on_temp;
+    double frac = (span > 0) ? (temp - c.fan_on_temp) / span : 1.0;
+    if (frac < 0)
+        frac = 0; // inside the hysteresis band -> hold at minimum duty
+    if (frac > 1)
+        frac = 1;
+
+    int duty = c.fan_min_duty +
+               (int)((c.fan_max_duty - c.fan_min_duty) * frac + 0.5);
+    if (duty < c.fan_min_duty)
+        duty = c.fan_min_duty;
+    if (duty > c.fan_max_duty)
+        duty = c.fan_max_duty;
+    return duty;
+}
 
 // ===========================================================================
 // Serial
@@ -377,9 +432,23 @@ static std::optional<std::string> autodetectPort()
     return std::nullopt;
 }
 
+// Write a full buffer to the serial fd, retrying short writes.
+static void serialWrite(int fd, const std::string &s)
+{
+    size_t off = 0;
+    while (off < s.size())
+    {
+        ssize_t n = ::write(fd, s.data() + off, s.size() - off);
+        if (n <= 0)
+            break;
+        off += (size_t)n;
+    }
+}
+
 static int openSerial(const std::string &dev)
 {
-    int fd = ::open(dev.c_str(), O_RDONLY | O_NOCTTY);
+    // O_RDWR: we both read sensor lines and write "F<duty>" fan commands.
+    int fd = ::open(dev.c_str(), O_RDWR | O_NOCTTY);
     if (fd < 0)
         return -1;
 
@@ -445,8 +514,8 @@ static bool parseLine(const std::string &line, double &h, double &t,
     return false;
 }
 
-static void serialLoop(DataStore &store, std::string fixedPort,
-                       std::atomic<bool> &running)
+static void serialLoop(DataStore &store, const Config &cfg,
+                       std::string fixedPort, std::atomic<bool> &running)
 {
     std::string lineBuf;
 
@@ -474,6 +543,10 @@ static void serialLoop(DataStore &store, std::string fixedPort,
         }
         std::cerr << "[serial] connected: " << port << "\n";
 
+        // Reset on each (re)connect: the Arduino reboots when the port opens,
+        // so re-establish the fan state from the next reading.
+        int prevDuty = -1;
+
         // Read byte-by-byte, splitting on CR/LF into lines.
         char buf[256];
         while (running)
@@ -494,7 +567,20 @@ static void serialLoop(DataStore &store, std::string fixedPort,
                         double h = 0, t = 0;
                         Status st;
                         if (parseLine(lineBuf, h, t, st))
+                        {
                             store.record(h, t, st);
+
+                            // Decide the fan duty and command it. On a sensor
+                            // error we can't measure temperature, so fail safe
+                            // to full speed. We send every reading (not only on
+                            // change) so the Arduino's watchdog stays fed.
+                            int duty = (st == Status::OK)
+                                           ? fanDutyForTemp(cfg, t, prevDuty)
+                                           : cfg.fan_max_duty;
+                            serialWrite(fd, "F" + std::to_string(duty) + "\n");
+                            prevDuty = duty;
+                            store.setFanDuty(duty);
+                        }
                         lineBuf.clear();
                     }
                 }
@@ -555,6 +641,10 @@ static std::string jsonLatest(DataStore &store)
     if (r->status == Status::OK)
         os << ",\"humidity\":" << r->humidity
            << ",\"temperature\":" << r->temperature;
+
+    int duty = store.fanDuty();
+    os << ",\"fan_duty\":" << duty
+       << ",\"fan_pct\":" << (duty < 0 ? 0 : (duty * 100 + 127) / 255);
 
     os << "}";
     return os.str();
@@ -622,6 +712,9 @@ static std::string jsonConfig(const Config &c)
        << ",\"temp_optimal_high\":" << c.temp_optimal_high
        << ",\"temp_warning_high\":" << c.temp_warning_high
        << ",\"temp_crit_high\":" << c.temp_crit_high
+       << ",\"fan_enabled\":" << (c.fan_enabled ? "true" : "false")
+       << ",\"fan_on_temp\":" << c.fan_on_temp
+       << ",\"fan_full_temp\":" << c.fan_full_temp
        << ",\"window_ms\":" << c.window_ms << "}";
     return os.str();
 }
@@ -724,8 +817,8 @@ int main(int argc, char **argv)
     DataStore store(cfg.log_file, cfg.window_ms);
     std::atomic<bool> running{true};
 
-    std::thread serial(serialLoop, std::ref(store), cfg.serial_port,
-                       std::ref(running));
+    std::thread serial(serialLoop, std::ref(store), std::ref(cfg),
+                       cfg.serial_port, std::ref(running));
     std::thread http(httpLoop, std::ref(store), std::ref(cfg), std::ref(running));
 
     serial.join();

@@ -266,6 +266,21 @@ class DataStore
     void setFanDuty(int d) { fanDuty_.store(d); }
     int fanDuty() const { return fanDuty_.load(); }
 
+    // Manual override. When manual, the serial loop ignores the temperature
+    // curve and commands fanOverrideDuty_ instead.
+    void setFanAuto() { fanManual_.store(false); }
+    void setFanManual(int duty)
+    {
+        if (duty < 0)
+            duty = 0;
+        if (duty > 255)
+            duty = 255;
+        fanOverrideDuty_.store(duty);
+        fanManual_.store(true);
+    }
+    bool fanManual() const { return fanManual_.load(); }
+    int fanOverrideDuty() const { return fanOverrideDuty_.load(); }
+
   private:
     void trimWindow()
     {
@@ -342,6 +357,8 @@ class DataStore
     std::optional<Reading> latest_;
     std::deque<Reading> window_;
     std::atomic<int> fanDuty_{-1};
+    std::atomic<bool> fanManual_{false};
+    std::atomic<int> fanOverrideDuty_{0};
 };
 
 // ===========================================================================
@@ -570,13 +587,19 @@ static void serialLoop(DataStore &store, const Config &cfg,
                         {
                             store.record(h, t, st);
 
-                            // Decide the fan duty and command it. On a sensor
-                            // error we can't measure temperature, so fail safe
-                            // to full speed. We send every reading (not only on
-                            // change) so the Arduino's watchdog stays fed.
-                            int duty = (st == Status::OK)
-                                           ? fanDutyForTemp(cfg, t, prevDuty)
-                                           : cfg.fan_max_duty;
+                            // Decide the fan duty and command it. A manual
+                            // override wins; otherwise follow the temperature
+                            // curve, failing safe to full speed on a sensor
+                            // error (can't measure -> assume worst). We send
+                            // every reading (not only on change) so the
+                            // Arduino's watchdog stays fed.
+                            int duty;
+                            if (store.fanManual())
+                                duty = store.fanOverrideDuty();
+                            else if (st == Status::OK)
+                                duty = fanDutyForTemp(cfg, t, prevDuty);
+                            else
+                                duty = cfg.fan_max_duty;
                             serialWrite(fd, "F" + std::to_string(duty) + "\n");
                             prevDuty = duty;
                             store.setFanDuty(duty);
@@ -644,7 +667,8 @@ static std::string jsonLatest(DataStore &store)
 
     int duty = store.fanDuty();
     os << ",\"fan_duty\":" << duty
-       << ",\"fan_pct\":" << (duty < 0 ? 0 : (duty * 100 + 127) / 255);
+       << ",\"fan_pct\":" << (duty < 0 ? 0 : (duty * 100 + 127) / 255)
+       << ",\"fan_mode\":\"" << (store.fanManual() ? "manual" : "auto") << "\"";
 
     os << "}";
     return os.str();
@@ -744,6 +768,26 @@ static std::string parseRequestPath(const std::string &req)
     return req.substr(sp + 1, sp2 - sp - 1);
 }
 
+// Look up a key in a raw query string like "mode=manual&duty=128".
+// Returns the value, or "" if absent.
+static std::string queryParam(const std::string &query, const std::string &key)
+{
+    std::string needle = key + "=";
+    size_t pos = 0;
+    while (pos <= query.size())
+    {
+        size_t amp = query.find('&', pos);
+        size_t len = (amp == std::string::npos) ? std::string::npos : amp - pos;
+        std::string pair = query.substr(pos, len);
+        if (pair.rfind(needle, 0) == 0)
+            return pair.substr(needle.size());
+        if (amp == std::string::npos)
+            break;
+        pos = amp + 1;
+    }
+    return "";
+}
+
 static void httpLoop(DataStore &store, const Config &cfg,
                      std::atomic<bool> &running)
 {
@@ -781,13 +825,46 @@ static void httpLoop(DataStore &store, const Config &cfg,
         }
         req[n] = 0;
 
-        std::string path = parseRequestPath(req);
+        std::string target = parseRequestPath(req);
+        std::string path = target, query;
+        size_t qm = target.find('?');
+        if (qm != std::string::npos)
+        {
+            path = target.substr(0, qm);
+            query = target.substr(qm + 1);
+        }
         std::string kDashboardHtml = readFileToString(cfg.hsrc);
 
         if (path == "/" || path == "/index.html")
             httpRespond(cfd, "200 OK", "text/html; charset=utf-8", kDashboardHtml);
         else if (path == "/api/latest")
             httpRespond(cfd, "200 OK", "application/json", jsonLatest(store));
+        else if (path == "/api/fan")
+        {
+            // Manual fan override:
+            //   /api/fan?mode=auto            -> resume temperature curve
+            //   /api/fan?mode=manual&duty=N   -> hold duty N (0-255)
+            //   /api/fan?duty=N               -> shorthand for manual at N
+            std::string mode = queryParam(query, "mode");
+            std::string dutyStr = queryParam(query, "duty");
+            if (mode == "auto")
+                store.setFanAuto();
+            else if (mode == "manual" || !dutyStr.empty())
+            {
+                int duty = 0;
+                try
+                {
+                    if (!dutyStr.empty())
+                        duty = std::stoi(dutyStr);
+                }
+                catch (...)
+                {
+                    duty = 0;
+                }
+                store.setFanManual(duty);
+            }
+            httpRespond(cfd, "200 OK", "application/json", jsonLatest(store));
+        }
         else if (path == "/api/history")
             httpRespond(cfd, "200 OK", "application/json", jsonHistory(store));
         else if (path == "/api/config")

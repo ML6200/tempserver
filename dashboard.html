@@ -244,6 +244,43 @@
                 background: rgba(78, 230, 168, 0.12);
                 box-shadow: var(--glow);
             }
+            .btn.active {
+                background: rgba(78, 230, 168, 0.18);
+                border-color: var(--green);
+                box-shadow: var(--glow);
+            }
+            .fanrow {
+                display: flex;
+                align-items: center;
+                gap: 14px;
+                flex-wrap: wrap;
+                margin-top: 16px;
+            }
+            .fanrow.disabled {
+                opacity: 0.3;
+                pointer-events: none;
+            }
+            .fanrow input[type="range"] {
+                flex: 1;
+                min-width: 180px;
+                accent-color: var(--green);
+                background: transparent;
+            }
+            .sliderval {
+                min-width: 52px;
+                font-size: 18px;
+                font-weight: bold;
+            }
+            .fanmode {
+                margin-top: 14px;
+                color: var(--green-dim);
+                font-size: 11px;
+                text-transform: uppercase;
+                letter-spacing: 0.2em;
+            }
+            .fanmode b {
+                color: var(--green);
+            }
             footer {
                 color: var(--green-dim);
                 font-size: 11px;
@@ -299,6 +336,32 @@
                     warning &middot; dotted: critical
                 </h2>
                 <svg id="tempChart" preserveAspectRatio="none"></svg>
+            </div>
+
+            <div class="panel">
+                <h2>Fan Control</h2>
+                <div class="actions">
+                    <button id="fanAuto" class="btn" type="button">Auto</button>
+                    <button id="fanManual" class="btn" type="button">
+                        Manual
+                    </button>
+                </div>
+                <div id="fanManualRow" class="fanrow disabled">
+                    <input
+                        id="fanSlider"
+                        type="range"
+                        min="0"
+                        max="100"
+                        value="0"
+                    />
+                    <span id="fanSliderVal" class="sliderval">0%</span>
+                    <button id="fanOff" class="btn" type="button">Off</button>
+                    <button id="fanFull" class="btn" type="button">Full</button>
+                </div>
+                <div class="fanmode">
+                    mode: <b id="fanModeLabel">--</b> &middot; output:
+                    <b id="fanOutLabel">--</b>
+                </div>
             </div>
 
             <div class="panel actions">
@@ -574,6 +637,7 @@
                         fpill.textContent = "--";
                         fpill.className = "pill";
                     }
+                    syncFanUI(d);
 
                     if (d.ok && d.status === "ok") {
                         document.getElementById("h").textContent =
@@ -613,6 +677,75 @@
                         "server unreachable";
                 }
             }
+            // ---- Fan control ----
+            const fanSlider = document.getElementById("fanSlider");
+            const fanSliderVal = document.getElementById("fanSliderVal");
+            const fanManualRow = document.getElementById("fanManualRow");
+            let fanDragging = false; // don't fight the user mid-drag
+
+            // PWM duty is 0-255 on the wire; the slider is a friendlier 0-100%.
+            const pctToDuty = (p) => Math.round((p * 255) / 100);
+
+            async function sendFan(params) {
+                try {
+                    await fetch("/api/fan?" + params);
+                } catch (e) {}
+                tick(); // refresh immediately
+            }
+
+            function setSliderLabel() {
+                fanSliderVal.textContent = fanSlider.value + "%";
+            }
+
+            document.getElementById("fanAuto").onclick = () =>
+                sendFan("mode=auto");
+            document.getElementById("fanManual").onclick = () =>
+                sendFan("mode=manual&duty=" + pctToDuty(+fanSlider.value));
+            document.getElementById("fanOff").onclick = () => {
+                fanSlider.value = 0;
+                setSliderLabel();
+                sendFan("mode=manual&duty=0");
+            };
+            document.getElementById("fanFull").onclick = () => {
+                fanSlider.value = 100;
+                setSliderLabel();
+                sendFan("mode=manual&duty=255");
+            };
+            fanSlider.addEventListener("input", () => {
+                fanDragging = true;
+                setSliderLabel();
+            });
+            fanSlider.addEventListener("change", () => {
+                fanDragging = false;
+                sendFan("mode=manual&duty=" + pctToDuty(+fanSlider.value));
+            });
+
+            // Reflect server state in the panel (called from tick()).
+            function syncFanUI(d) {
+                const manual = d.fan_mode === "manual";
+                document
+                    .getElementById("fanAuto")
+                    .classList.toggle("active", d.fan_mode === "auto");
+                document
+                    .getElementById("fanManual")
+                    .classList.toggle("active", manual);
+                fanManualRow.classList.toggle("disabled", !manual);
+
+                document.getElementById("fanModeLabel").textContent =
+                    d.fan_mode || "--";
+                document.getElementById("fanOutLabel").textContent =
+                    typeof d.fan_pct === "number" && d.fan_duty >= 0
+                        ? d.fan_pct + "%"
+                        : "--";
+
+                // Keep the slider in step with the actual output unless the
+                // user is dragging it right now.
+                if (!fanDragging && typeof d.fan_pct === "number") {
+                    fanSlider.value = d.fan_pct;
+                    setSliderLabel();
+                }
+            }
+
             let lastHist = null;
             let rzTimer = null;
             window.addEventListener("resize", () => {

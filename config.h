@@ -26,5 +26,16 @@ struct Config
     double temp_optimal_high = 24;
     double temp_warning_high = 33;
     double temp_crit_high = 34;
+
+    // Fan control. The server computes a PWM duty (0-255) from the latest
+    // temperature and sends "F<duty>\n" over serial; the Arduino applies it to
+    // the fan pin. Off below fan_on_temp, ramps from fan_min_duty up to
+    // fan_max_duty as temperature rises to fan_full_temp.
+    bool fan_enabled = true;
+    double fan_on_temp = 24;      // start cooling above this (deg C)
+    double fan_full_temp = 35;    // full speed at/above this (deg C)
+    int fan_min_duty = 100;       // minimum duty when on (overcome stiction)
+    int fan_max_duty = 255;       // duty at/above fan_full_temp
+    double fan_hysteresis = 1.0;  // deg C; turn-off point = fan_on_temp - this
 };
 #endif

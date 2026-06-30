@@ -277,6 +277,13 @@
                     </div>
                     <div id="tpill" class="pill">--</div>
                 </div>
+                <div class="card panel">
+                    <div class="label">Fan</div>
+                    <div class="value">
+                        <span id="fan">--</span><span class="unit"> %</span>
+                    </div>
+                    <div id="fpill" class="pill">--</div>
+                </div>
             </div>
 
             <div class="panel">
@@ -547,6 +554,27 @@
                     const st = document.getElementById("status");
                     const hpill = document.getElementById("hpill");
                     const tpill = document.getElementById("tpill");
+                    const fpill = document.getElementById("fpill");
+
+                    // Fan readout (sent on every reading, ok or error).
+                    if (typeof d.fan_pct === "number" && d.fan_duty >= 0) {
+                        document.getElementById("fan").textContent = d.fan_pct;
+                        if (d.fan_duty === 0) {
+                            fpill.textContent = "off";
+                            fpill.className = "pill optimal";
+                        } else if (d.fan_pct >= 100) {
+                            fpill.textContent = "full";
+                            fpill.className = "pill critical";
+                        } else {
+                            fpill.textContent = "cooling";
+                            fpill.className = "pill warning";
+                        }
+                    } else {
+                        document.getElementById("fan").textContent = "--";
+                        fpill.textContent = "--";
+                        fpill.className = "pill";
+                    }
+
                     if (d.ok && d.status === "ok") {
                         document.getElementById("h").textContent =
                             d.humidity.toFixed(1);

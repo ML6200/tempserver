@@ -1,1 +1,2 @@
-default_port: /dev/cu.usbmodem12301
+default_fqbn: arduino:avr:uno
+default_port: /dev/serial/by-id/usb-Arduino__www.arduino.cc__0043_55739323237351700270-if00

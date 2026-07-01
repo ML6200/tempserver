@@ -260,6 +260,71 @@ class DataStore
         return std::vector<Reading>(window_.begin(), window_.end());
     }
 
+    // Read an arbitrary historical range straight from the disk log (which keeps
+    // everything, unlike the in-memory window). Points are decimated with an even
+    // stride so a multi-day view stays light enough for the SVG charts.
+    std::vector<Reading> readRange(long long from, long long to, size_t maxPoints)
+    {
+        std::vector<Reading> all;
+        std::ifstream f(logPath_);
+        if (f)
+        {
+            bool first = true;
+            std::string line;
+            while (std::getline(f, line))
+            {
+                if (first)
+                {
+                    first = false;
+                    if (line.rfind("epoch_ms", 0) == 0)
+                        continue;
+                }
+
+                std::stringstream ss(line);
+                std::string a, b, c, d;
+                if (!std::getline(ss, a, ','))
+                    continue;
+                std::getline(ss, b, ',');
+                std::getline(ss, c, ',');
+                std::getline(ss, d, ',');
+
+                try
+                {
+                    long long ts = std::stoll(a);
+                    if (ts < from || ts > to)
+                        continue;
+
+                    Status st = (trim(d) == "ok") ? Status::OK : Status::Error;
+                    double h = 0, t = 0;
+                    if (st == Status::OK)
+                    {
+                        h = std::stod(b);
+                        t = std::stod(c);
+                    }
+                    all.push_back(Reading{ts, h, t, st});
+                }
+                catch (...)
+                {
+                    // Malformed or partially-written line: skip it.
+                }
+            }
+        }
+
+        if (maxPoints == 0 || all.size() <= maxPoints)
+            return all;
+
+        // Even-stride decimation; always keep the final sample so the line
+        // reaches the right edge of the chart.
+        std::vector<Reading> out;
+        out.reserve(maxPoints + 1);
+        double stride = static_cast<double>(all.size()) / maxPoints;
+        for (double i = 0; i < all.size(); i += stride)
+            out.push_back(all[static_cast<size_t>(i)]);
+        if (out.empty() || out.back().epoch_ms != all.back().epoch_ms)
+            out.push_back(all.back());
+        return out;
+    }
+
     std::string logPath() const { return logPath_; }
 
     // Last fan duty (0-255) the server commanded, or -1 if none yet sent.
@@ -674,10 +739,8 @@ static std::string jsonLatest(DataStore &store)
     return os.str();
 }
 
-static std::string jsonHistory(DataStore &store)
+static std::string jsonHistory(const std::vector<Reading> &w)
 {
-    auto w = store.window();
-
     // Build four parallel JSON arrays: timestamps, humidity, temp, status.
     std::ostringstream ts, hs, tps, sts;
     ts << "[";
@@ -866,7 +929,23 @@ static void httpLoop(DataStore &store, const Config &cfg,
             httpRespond(cfd, "200 OK", "application/json", jsonLatest(store));
         }
         else if (path == "/api/history")
-            httpRespond(cfd, "200 OK", "application/json", jsonHistory(store));
+        {
+            // With no params, serve the live in-memory window. With from/to
+            // (epoch ms) serve an arbitrary range read back from the disk log.
+            std::string fromS = queryParam(query, "from");
+            std::string toS = queryParam(query, "to");
+            if (!fromS.empty() || !toS.empty())
+            {
+                long long from = 0, to = nowMs();
+                try { if (!fromS.empty()) from = std::stoll(fromS); } catch (...) {}
+                try { if (!toS.empty()) to = std::stoll(toS); } catch (...) {}
+                httpRespond(cfd, "200 OK", "application/json",
+                            jsonHistory(store.readRange(from, to, 2000)));
+            }
+            else
+                httpRespond(cfd, "200 OK", "application/json",
+                            jsonHistory(store.window()));
+        }
         else if (path == "/api/config")
             httpRespond(cfd, "200 OK", "application/json", jsonConfig(cfg));
         else if (path == "/api/export" || path == "/api/export.csv")

@@ -271,6 +271,21 @@
                 font-size: 18px;
                 font-weight: bold;
             }
+            .rangelbl {
+                color: var(--green-dim);
+                font-size: 11px;
+                text-transform: uppercase;
+                letter-spacing: 0.16em;
+            }
+            #customRange input[type="datetime-local"] {
+                background: rgba(2, 10, 6, 0.6);
+                border: 1px solid var(--green-dim);
+                color: var(--green);
+                font-family: inherit;
+                font-size: 12px;
+                padding: 6px 8px;
+                color-scheme: dark;
+            }
             .fanmode {
                 margin-top: 14px;
                 color: var(--green-dim);
@@ -324,16 +339,48 @@
             </div>
 
             <div class="panel">
+                <h2>Range</h2>
+                <div class="actions" id="rangeBtns">
+                    <button class="btn" type="button" data-range="900000">
+                        15m
+                    </button>
+                    <button class="btn" type="button" data-range="3600000">
+                        1h
+                    </button>
+                    <button class="btn" type="button" data-range="21600000">
+                        6h
+                    </button>
+                    <button class="btn" type="button" data-range="86400000">
+                        24h
+                    </button>
+                    <button class="btn" type="button" data-range="604800000">
+                        7d
+                    </button>
+                    <button class="btn" type="button" data-range="all">
+                        All
+                    </button>
+                </div>
+                <div class="fanrow" id="customRange">
+                    <label class="rangelbl">From</label>
+                    <input id="fromT" type="datetime-local" />
+                    <label class="rangelbl">To</label>
+                    <input id="toT" type="datetime-local" />
+                    <button id="applyRange" class="btn" type="button">
+                        Apply
+                    </button>
+                </div>
+            </div>
+            <div class="panel">
                 <h2>
-                    Humidity (%RH) &mdash; solid: optimal &middot; dashed:
-                    warning &middot; dotted: critical
+                    Humidity (%RH) &mdash; line color: green normal &middot;
+                    amber warning &middot; red critical
                 </h2>
                 <svg id="humChart" preserveAspectRatio="none"></svg>
             </div>
             <div class="panel">
                 <h2>
-                    Temperature (&deg;C) &mdash; solid: optimal &middot; dashed:
-                    warning &middot; dotted: critical
+                    Temperature (&deg;C) &mdash; line color: green normal
+                    &middot; amber warning &middot; red critical
                 </h2>
                 <svg id="tempChart" preserveAspectRatio="none"></svg>
             </div>
@@ -441,26 +488,65 @@
                 critical: "critical",
             };
 
-            // Build an SVG line that breaks at null gaps (sensor errors).
-            function linePath(vals, min, max, W) {
+            // Status-band colors, matching the pill/status indicator:
+            // optimal & normal -> green, warning -> amber, critical -> red.
+            const BAND_COLOR = {
+                optimal: "#4ee6a8",
+                normal: "#4ee6a8",
+                warning: "#d8c15a",
+                critical: "#e8625a",
+            };
+            const BAND_SEV = { optimal: 0, normal: 0, warning: 1, critical: 2 };
+            // Color a segment by the more severe of its two endpoints so a brief
+            // excursion into warning/critical still stands out.
+            function segColor(classFn, a, b) {
+                const ca = classFn(a),
+                    cb = classFn(b);
+                const c = BAND_SEV[ca] >= BAND_SEV[cb] ? ca : cb;
+                return BAND_COLOR[c] || "#4ee6a8";
+            }
+
+            // Build an SVG polyline colored per status band. Consecutive
+            // same-color segments are merged into one <path>; null gaps (sensor
+            // errors) break the pen. Returns an SVG fragment (possibly several
+            // <path> elements).
+            function coloredLine(vals, min, max, W, classFn) {
                 const span = max - min || 1;
                 const n = vals.length;
+                const xFor = (i) =>
+                    padL + (W - padL - padR) * (n < 2 ? 0 : i / (n - 1));
+                const yOf = (v) =>
+                    H - padB - ((H - padT - padB) * (v - min)) / span;
+                let out = "";
                 let d = "";
-                let pen = false;
-                for (let i = 0; i < n; i++) {
-                    const v = vals[i];
-                    if (v == null) {
-                        pen = false;
+                let cur = null;
+                const flush = () => {
+                    if (d) {
+                        out += `<path d="${d.trim()}" fill="none" stroke="${cur}" stroke-width="2" style="filter:drop-shadow(0 0 4px rgba(78,230,168,0.55))"/>`;
+                        d = "";
+                    }
+                };
+                for (let i = 0; i < n - 1; i++) {
+                    if (vals[i] == null || vals[i + 1] == null) {
+                        flush();
+                        cur = null;
                         continue;
                     }
-                    const x =
-                        padL + (W - padL - padR) * (n < 2 ? 0 : i / (n - 1));
-                    const y = H - padB - ((H - padT - padB) * (v - min)) / span;
-                    d +=
-                        (pen ? " L" : " M") + x.toFixed(1) + "," + y.toFixed(1);
-                    pen = true;
+                    const c = segColor(classFn, vals[i], vals[i + 1]);
+                    const x1 = xFor(i).toFixed(1),
+                        y1 = yOf(vals[i]).toFixed(1),
+                        x2 = xFor(i + 1).toFixed(1),
+                        y2 = yOf(vals[i + 1]).toFixed(1);
+                    if (c !== cur) {
+                        flush();
+                        cur = c;
+                        d = `M${x1},${y1} L${x2},${y2}`;
+                    } else {
+                        d += ` L${x2},${y2}`;
+                    }
                 }
-                return d.trim();
+                flush();
+                return out;
             }
             function yFor(v, min, max) {
                 const span = max - min || 1;
@@ -483,7 +569,37 @@
                 return mk(max) + mk(mid) + mk(min);
             }
 
-            function renderHum(vals) {
+            // Time-axis tick labels (start / middle / end of the visible range).
+            // Format adapts to span: dates for multi-day views, else HH:MM.
+            function fmtTime(ms, span) {
+                const d = new Date(ms);
+                const p = (x) => String(x).padStart(2, "0");
+                if (span > 36 * 3600 * 1000)
+                    return p(d.getMonth() + 1) + "/" + p(d.getDate());
+                if (span > 3 * 3600 * 1000)
+                    return (
+                        p(d.getMonth() + 1) +
+                        "/" +
+                        p(d.getDate()) +
+                        " " +
+                        p(d.getHours()) +
+                        ":" +
+                        p(d.getMinutes())
+                    );
+                return p(d.getHours()) + ":" + p(d.getMinutes());
+            }
+            function timeAxis(tArr, W) {
+                if (!tArr || tArr.length < 2) return "";
+                const span = tArr[tArr.length - 1] - tArr[0];
+                const mk = (frac, anchor) => {
+                    const idx = Math.round(frac * (tArr.length - 1));
+                    const x = padL + (W - padL - padR) * frac;
+                    return `<text x="${x.toFixed(0)}" y="${H - 6}" fill="#2f8c64" font-size="11" font-family="Courier New, monospace" text-anchor="${anchor}">${fmtTime(tArr[idx], span)}</text>`;
+                };
+                return mk(0, "start") + mk(0.5, "middle") + mk(1, "end");
+            }
+
+            function renderHum(vals, tArr) {
                 const svg = document.getElementById("humChart");
                 const W = chartW(svg);
                 svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
@@ -536,12 +652,11 @@
                 parts += hline(cfg.hum_crit_low, lo, hi, "#e8625a", "2 4", W);
                 parts += hline(cfg.hum_crit_high, lo, hi, "#e8625a", "2 4", W);
                 parts += axisLabels(lo, hi);
-                const d = linePath(vals, lo, hi, W);
-                if (d)
-                    parts += `<path d="${d}" fill="none" stroke="#4ee6a8" stroke-width="2" style="filter:drop-shadow(0 0 4px rgba(78,230,168,0.7))"/>`;
+                parts += timeAxis(tArr, W);
+                parts += coloredLine(vals, lo, hi, W, classifyHum);
                 svg.innerHTML = parts;
             }
-            function renderTemp(vals) {
+            function renderTemp(vals, tArr) {
                 const svg = document.getElementById("tempChart");
                 const W = chartW(svg);
                 svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
@@ -602,9 +717,8 @@
                 parts += hline(cfg.temp_crit_low, lo, hi, "#e8625a", "2 4", W);
                 parts += hline(cfg.temp_crit_high, lo, hi, "#e8625a", "2 4", W);
                 parts += axisLabels(lo, hi);
-                const d = linePath(vals, lo, hi, W);
-                if (d)
-                    parts += `<path d="${d}" fill="none" stroke="#4ee6a8" stroke-width="2" style="filter:drop-shadow(0 0 4px rgba(78,230,168,0.7))"/>`;
+                parts += timeAxis(tArr, W);
+                parts += coloredLine(vals, lo, hi, W, classifyTemp);
                 svg.innerHTML = parts;
             }
 
@@ -668,10 +782,8 @@
                     } else {
                         st.textContent = "waiting for first reading...";
                     }
-                    const hist = await (await fetch("/api/history")).json();
-                    lastHist = hist;
-                    renderHum(hist.humidity);
-                    renderTemp(hist.temperature);
+                    lastHist = await (await fetch("/api/history")).json();
+                    refreshCharts(false);
                 } catch (e) {
                     document.getElementById("status").textContent =
                         "server unreachable";
@@ -746,16 +858,123 @@
                 }
             }
 
+            // ---- Chart range / date selection ----
+            // lastHist  = latest in-memory window (from /api/history, ~6h, live)
+            // viewHist  = dataset currently on screen (may be disk-fetched)
+            // range     = {kind:'rolling', ms} for relative presets, or
+            //             {kind:'fixed', from, to} for a picked date range.
             let lastHist = null;
+            let viewHist = null;
+            let range = { kind: "rolling", ms: 21600000 }; // default: last 6h
+            let lastDiskFetch = 0;
+
+            function sliceByTime(hist, from, to) {
+                if (!hist) return null;
+                const t = [],
+                    h = [],
+                    tp = [],
+                    s = [];
+                for (let i = 0; i < hist.t.length; i++) {
+                    const ts = hist.t[i];
+                    if (ts >= from && ts <= to) {
+                        t.push(ts);
+                        h.push(hist.humidity[i]);
+                        tp.push(hist.temperature[i]);
+                        s.push(hist.status ? hist.status[i] : "ok");
+                    }
+                }
+                return { t: t, humidity: h, temperature: tp, status: s };
+            }
+
+            async function fetchRange(from, to) {
+                const q =
+                    "/api/history?from=" +
+                    Math.floor(from) +
+                    "&to=" +
+                    Math.floor(to);
+                return await (await fetch(q)).json();
+            }
+
+            function draw(hist) {
+                if (!hist) return;
+                renderHum(hist.humidity, hist.t);
+                renderTemp(hist.temperature, hist.t);
+            }
+
+            // Decide the data source for the current range and render. `force`
+            // bypasses the disk-refetch throttle (used on an explicit selection).
+            async function refreshCharts(force) {
+                if (!cfg) return;
+                if (range.kind === "fixed") {
+                    if (force || !viewHist)
+                        viewHist = await fetchRange(range.from, range.to);
+                    draw(viewHist);
+                    return;
+                }
+                // rolling
+                const to = Date.now();
+                if (range.ms !== "all" && range.ms <= cfg.window_ms) {
+                    // Within the in-memory window: slice it client-side (stays live).
+                    draw(sliceByTime(lastHist, to - range.ms, to));
+                } else {
+                    // Beyond the window: pull from disk, throttled to ~10s.
+                    if (force || to - lastDiskFetch > 10000) {
+                        const from = range.ms === "all" ? 0 : to - range.ms;
+                        viewHist = await fetchRange(from, to);
+                        lastDiskFetch = to;
+                    }
+                    draw(viewHist);
+                }
+            }
+
+            const rangeBtns = document.getElementById("rangeBtns");
+            function markActive(el) {
+                rangeBtns
+                    .querySelectorAll(".btn")
+                    .forEach((b) => b.classList.toggle("active", b === el));
+            }
+            rangeBtns.querySelectorAll(".btn").forEach((btn) => {
+                btn.addEventListener("click", () => {
+                    const r = btn.dataset.range;
+                    range =
+                        r === "all"
+                            ? { kind: "rolling", ms: "all" }
+                            : { kind: "rolling", ms: +r };
+                    markActive(btn);
+                    refreshCharts(true);
+                });
+            });
+            document.getElementById("applyRange").onclick = () => {
+                const fv = document.getElementById("fromT").value;
+                const tv = document.getElementById("toT").value;
+                if (!fv || !tv) return;
+                const from = new Date(fv).getTime();
+                const to = new Date(tv).getTime();
+                if (isNaN(from) || isNaN(to) || from >= to) return;
+                range = { kind: "fixed", from: from, to: to };
+                markActive(null);
+                refreshCharts(true);
+            };
+            // Highlight the default (6h) preset on load.
+            markActive(rangeBtns.querySelector('[data-range="21600000"]'));
+
+            // Prefill the custom date pickers with the last 6h (local wall-clock).
+            function toLocalInput(ms) {
+                const d = new Date(ms - new Date().getTimezoneOffset() * 60000);
+                return d.toISOString().slice(0, 16);
+            }
+            (function seedCustomRange() {
+                const now = Date.now();
+                document.getElementById("toT").value = toLocalInput(now);
+                document.getElementById("fromT").value = toLocalInput(
+                    now - 21600000,
+                );
+            })();
+
             let rzTimer = null;
             window.addEventListener("resize", () => {
                 clearTimeout(rzTimer);
-                rzTimer = setTimeout(() => {
-                    if (lastHist) {
-                        renderHum(lastHist.humidity);
-                        renderTemp(lastHist.temperature);
-                    }
-                }, 150);
+                rzTimer = setTimeout(() => refreshCharts(false), 150);
             });
             tick();
             setInterval(tick, 2000);

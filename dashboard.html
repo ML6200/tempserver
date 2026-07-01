@@ -411,8 +411,20 @@
                 </div>
             </div>
 
-            <div class="panel actions">
-                <a class="btn" href="/api/export.csv" download>Export CSV</a>
+            <div class="panel">
+                <h2>Data</h2>
+                <div class="actions">
+                    <a
+                        class="btn"
+                        href="/api/export.csv?stat_action=export"
+                        download
+                        >Export CSV</a
+                    >
+                    <button id="resetStats" class="btn" type="button">
+                        Reset Statistics
+                    </button>
+                </div>
+                <div id="dataMsg" class="fanmode"></div>
             </div>
             <footer>
                 Updates every 2s &middot; disk-backed history &middot;
@@ -970,6 +982,37 @@
                     now - 21600000,
                 );
             })();
+
+            // ---- Reset stored statistics (clears the disk-backed log) ----
+            const dataMsg = document.getElementById("dataMsg");
+            document.getElementById("resetStats").onclick = async () => {
+                if (
+                    !confirm(
+                        "Delete all stored readings? This clears the history " +
+                            "log on disk and cannot be undone.",
+                    )
+                )
+                    return;
+                const btn = document.getElementById("resetStats");
+                btn.disabled = true;
+                dataMsg.textContent = "resetting…";
+                try {
+                    const r = await fetch("/api/stored?stat_action=reset");
+                    const j = await r.json();
+                    if (!r.ok || j.status !== "ok")
+                        throw new Error(j.status || "failed");
+                    // Drop cached client-side history so charts reflect the wipe.
+                    viewHist = null;
+                    lastDiskFetch = 0;
+                    dataMsg.textContent = "statistics reset.";
+                    await refreshCharts(true);
+                } catch (e) {
+                    dataMsg.textContent = "reset failed: " + e.message;
+                } finally {
+                    btn.disabled = false;
+                    setTimeout(() => (dataMsg.textContent = ""), 4000);
+                }
+            };
 
             let rzTimer = null;
             window.addEventListener("resize", () => {

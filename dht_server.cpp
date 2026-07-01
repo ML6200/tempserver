@@ -28,6 +28,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -351,6 +352,33 @@ class DataStore
     }
 
     std::string logPath() const { return logPath_; }
+
+    // Wipe all stored history: truncate the disk log (keeping the CSV header)
+    // and clear the in-memory window/latest. Returns false if the log could not
+    // be reopened for writing, in which case persistence is disabled until the
+    // next restart. Holds the same lock as record() so a concurrent write can't
+    // slip into the file between the truncate and the header rewrite.
+    bool reset()
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+
+        window_.clear();
+        latest_.reset();
+
+        out_.close();
+        out_.clear(); // drop any error flags from the closed stream
+        out_.open(logPath_, std::ios::trunc);
+        if (!out_)
+        {
+            std::cerr << "[store] ERROR: cannot reopen " << logPath_
+                      << " after reset — readings will NOT be persisted\n";
+            return false;
+        }
+
+        out_ << "epoch_ms,humidity,temperature,status\n";
+        out_.flush();
+        return true;
+    }
 
     // Last fan duty (0-255) the server commanded, or -1 if none yet sent.
     void setFanDuty(int d) { fanDuty_.store(d); }
@@ -980,10 +1008,26 @@ static void httpLoop(DataStore &store, const Config &cfg,
         }
         else if (path == "/api/config")
             httpRespond(cfd, "200 OK", "application/json", jsonConfig(cfg));
-        else if (path == "/api/export" || path == "/api/export.csv")
-            httpRespond(
-                cfd, "200 OK", "text/csv", readFileToString(store.logPath()),
-                "Content-Disposition: attachment; filename=\"readings.csv\"\r\n");
+        else if (path == "/api/stored" || path == "/api/export.csv")
+        {
+            std::string file_action = queryParam(query, "stat_action");
+
+            if (file_action == "export")
+                httpRespond(
+                    cfd, "200 OK", "text/csv", readFileToString(store.logPath()),
+                    "Content-Disposition: attachment; filename=\"readings.csv\"\r\n");
+            else if (file_action == "reset")
+            {
+                const bool ok = store.reset();
+                const std::string body = ok ? "{\"status\":\"ok\"}" : "{\"status\":\"fail\"}";
+
+                httpRespond(cfd, ok ? "200 OK" : "500 Internal Server Error",
+                            "application/json", body);
+            }
+            else
+                httpRespond(cfd, "400 Bad Request", "application/json",
+                            "{\"status\":\"fail\",\"error\":\"unknown stat_action\"}");
+        }
         else
             httpRespond(cfd, "404 Not Found", "text/plain", "not found");
 

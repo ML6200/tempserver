@@ -44,6 +44,15 @@
 
 namespace fs = std::filesystem;
 
+// Version + build number. The Makefile injects these via -D (build number is
+// the git commit count); the fallbacks let a bare `g++ ...` compile still work.
+#ifndef APP_VERSION
+#define APP_VERSION "0.0.0"
+#endif
+#ifndef BUILD_NUMBER
+#define BUILD_NUMBER "dev"
+#endif
+
 extern const char *kDashboardHtml; // defined in dashboard.cpp
 
 static std::string trim(const std::string &s)
@@ -137,6 +146,7 @@ static Config loadConfig(const std::string &path)
         {"serial_port", S(c.serial_port)},
         {"http_port", I(c.http_port)},
         {"log_file", S(c.log_file)},
+        {"hsrc", S(c.hsrc)},
         {"chart_window", [&](const std::string &v)
          { c.window_ms = parseDuration(v); }},
         {"hum_crit_low", D(c.hum_crit_low)},
@@ -870,6 +880,91 @@ static std::string readFileToString(const std::string &path)
     return ss.str();
 }
 
+// Format a number for the config file: default ostream formatting, so whole
+// values stay clean ("30" not "30.000000").
+static std::string fmtNum(double v)
+{
+    std::ostringstream os;
+    os << v;
+    return os.str();
+}
+
+// The six thresholds on each axis must be non-decreasing:
+//   crit_low <= warning_low <= optimal_low <= optimal_high <= warning_high <= crit_high
+// Returns false (with a message) if either axis is out of order.
+static bool validThresholds(const Config &c, std::string &err)
+{
+    auto ordered = [](double a, double b, double d, double e, double f, double g)
+    { return a <= b && b <= d && d <= e && e <= f && f <= g; };
+
+    if (!ordered(c.hum_crit_low, c.hum_warning_low, c.hum_optimal_low,
+                 c.hum_optimal_high, c.hum_warning_high, c.hum_crit_high))
+    {
+        err = "humidity thresholds out of order";
+        return false;
+    }
+    if (!ordered(c.temp_crit_low, c.temp_warning_low, c.temp_optimal_low,
+                 c.temp_optimal_high, c.temp_warning_high, c.temp_crit_high))
+    {
+        err = "temperature thresholds out of order";
+        return false;
+    }
+    return true;
+}
+
+// Rewrite the given key=value pairs in the config file in place, preserving
+// comments, blank lines, key ordering, and the original left-hand alignment.
+// Keys not already present are appended. Returns false on write failure.
+static bool updateConfigFile(const std::string &path,
+                             const std::vector<std::pair<std::string, std::string>> &kv)
+{
+    std::vector<std::string> lines;
+    {
+        std::ifstream in(path);
+        std::string line;
+        while (std::getline(in, line))
+            lines.push_back(line);
+    }
+
+    std::vector<bool> written(kv.size(), false);
+
+    for (auto &line : lines)
+    {
+        std::string t = trim(line);
+        if (t.empty() || t[0] == '#')
+            continue;
+        size_t eq = line.find('=');
+        if (eq == std::string::npos)
+            continue;
+        std::string key = trim(line.substr(0, eq));
+
+        for (size_t i = 0; i < kv.size(); ++i)
+        {
+            if (key == kv[i].first)
+            {
+                // Keep everything up to and including '=' (preserves alignment).
+                line = line.substr(0, eq + 1) + " " + kv[i].second;
+                written[i] = true;
+                break;
+            }
+        }
+    }
+
+    std::ofstream out(path, std::ios::trunc);
+    if (!out)
+    {
+        std::cerr << "[config] ERROR: cannot write " << path << "\n";
+        return false;
+    }
+    for (const auto &line : lines)
+        out << line << "\n";
+    // Append any keys that weren't already in the file.
+    for (size_t i = 0; i < kv.size(); ++i)
+        if (!written[i])
+            out << kv[i].first << " = " << kv[i].second << "\n";
+    return static_cast<bool>(out);
+}
+
 // Extract the request path from the first line of an HTTP request.
 static std::string parseRequestPath(const std::string &req)
 {
@@ -905,8 +1000,8 @@ static std::string queryParam(const std::string &query, const std::string &key)
     return "";
 }
 
-static void httpLoop(DataStore &store, const Config &cfg,
-                     std::atomic<bool> &running)
+static void httpLoop(DataStore &store, Config &cfg,
+                     const std::string &cfgPath, std::atomic<bool> &running)
 {
     int sfd = ::socket(AF_INET, SOCK_STREAM, 0);
     int yes = 1;
@@ -1007,7 +1102,70 @@ static void httpLoop(DataStore &store, const Config &cfg,
             }
         }
         else if (path == "/api/config")
-            httpRespond(cfd, "200 OK", "application/json", jsonConfig(cfg));
+        {
+            // No params -> read config. With threshold params -> update them.
+            // Only the display threshold bands are editable here; those fields
+            // are read solely by this (single-threaded) accept loop, so no lock
+            // is needed against the serial thread, which only reads fan_* values.
+            if (query.empty())
+                httpRespond(cfd, "200 OK", "application/json", jsonConfig(cfg));
+            else
+            {
+                auto dparam = [&](const char *k, double cur)
+                {
+                    std::string s = queryParam(query, k);
+                    if (s.empty())
+                        return cur;
+                    try
+                    {
+                        return std::stod(s);
+                    }
+                    catch (...)
+                    {
+                        return cur;
+                    }
+                };
+
+                // Validate on a copy so a bad request leaves cfg untouched.
+                Config nc = cfg;
+                nc.hum_crit_low = dparam("hum_crit_low", cfg.hum_crit_low);
+                nc.hum_warning_low = dparam("hum_warning_low", cfg.hum_warning_low);
+                nc.hum_optimal_low = dparam("hum_optimal_low", cfg.hum_optimal_low);
+                nc.hum_optimal_high = dparam("hum_optimal_high", cfg.hum_optimal_high);
+                nc.hum_warning_high = dparam("hum_warning_high", cfg.hum_warning_high);
+                nc.hum_crit_high = dparam("hum_crit_high", cfg.hum_crit_high);
+                nc.temp_crit_low = dparam("temp_crit_low", cfg.temp_crit_low);
+                nc.temp_warning_low = dparam("temp_warning_low", cfg.temp_warning_low);
+                nc.temp_optimal_low = dparam("temp_optimal_low", cfg.temp_optimal_low);
+                nc.temp_optimal_high = dparam("temp_optimal_high", cfg.temp_optimal_high);
+                nc.temp_warning_high = dparam("temp_warning_high", cfg.temp_warning_high);
+                nc.temp_crit_high = dparam("temp_crit_high", cfg.temp_crit_high);
+
+                std::string err;
+                if (!validThresholds(nc, err))
+                    httpRespond(cfd, "400 Bad Request", "application/json",
+                                "{\"status\":\"fail\",\"error\":\"" + err + "\"}");
+                else
+                {
+                    cfg = nc;
+                    updateConfigFile(
+                        cfgPath,
+                        {{"hum_crit_low", fmtNum(cfg.hum_crit_low)},
+                         {"hum_warning_low", fmtNum(cfg.hum_warning_low)},
+                         {"hum_optimal_low", fmtNum(cfg.hum_optimal_low)},
+                         {"hum_optimal_high", fmtNum(cfg.hum_optimal_high)},
+                         {"hum_warning_high", fmtNum(cfg.hum_warning_high)},
+                         {"hum_crit_high", fmtNum(cfg.hum_crit_high)},
+                         {"temp_crit_low", fmtNum(cfg.temp_crit_low)},
+                         {"temp_warning_low", fmtNum(cfg.temp_warning_low)},
+                         {"temp_optimal_low", fmtNum(cfg.temp_optimal_low)},
+                         {"temp_optimal_high", fmtNum(cfg.temp_optimal_high)},
+                         {"temp_warning_high", fmtNum(cfg.temp_warning_high)},
+                         {"temp_crit_high", fmtNum(cfg.temp_crit_high)}});
+                    httpRespond(cfd, "200 OK", "application/json", jsonConfig(cfg));
+                }
+            }
+        }
         else if (path == "/api/stored" || path == "/api/export.csv")
         {
             std::string file_action = queryParam(query, "stat_action");
@@ -1043,6 +1201,11 @@ static void httpLoop(DataStore &store, const Config &cfg,
 
 int main(int argc, char **argv)
 {
+    std::cerr << "===========================================\n"
+              << "  dht_server  v" APP_VERSION "  (build " BUILD_NUMBER ")\n"
+              << "  DHT22 -> serial -> disk-backed dashboard\n"
+              << "===========================================\n";
+
     std::string cfgPath = (argc >= 2) ? argv[1] : "dht.conf";
     Config cfg = loadConfig(cfgPath);
 
@@ -1051,7 +1214,8 @@ int main(int argc, char **argv)
 
     std::thread serial(serialLoop, std::ref(store), std::ref(cfg),
                        cfg.serial_port, std::ref(running));
-    std::thread http(httpLoop, std::ref(store), std::ref(cfg), std::ref(running));
+    std::thread http(httpLoop, std::ref(store), std::ref(cfg), std::cref(cfgPath),
+                     std::ref(running));
 
     serial.join();
     http.join();

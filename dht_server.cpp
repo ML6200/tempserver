@@ -20,11 +20,14 @@
 #include <cstring>
 #include <deque>
 #include <fstream>
+#include <functional>
 #include <iostream>
+#include <iterator>
 #include <mutex>
 #include <optional>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -91,7 +94,6 @@ static long long parseDuration(const std::string &v)
 static Config loadConfig(const std::string &path)
 {
     Config c;
-
     std::ifstream f(path);
     if (!f)
     {
@@ -99,64 +101,87 @@ static Config loadConfig(const std::string &path)
         return c;
     }
 
+    struct Entry
+    {
+        std::string_view key;
+        std::function<void(const std::string &)> fn;
+    };
+
+    // lambda function patterns
+    auto D = [](double &field)
+    {
+        return [&](const std::string &v)
+        { field = std::stod(v); };
+    };
+
+    auto I = [](int &field)
+    {
+        return [&](const std::string &v)
+        { field = std::stoi(v); };
+    };
+
+    auto S = [](std::string &field)
+    {
+        return [&](const std::string &v)
+        { field = v; };
+    };
+
+    auto B = [](bool &field)
+    {
+        return [&](const std::string &v)
+        { field = (v == "1" || v == "true" || v == "yes" || v == "on"); };
+    };
+
+    const Entry handlers[] = {
+        {"serial_port", S(c.serial_port)},
+        {"http_port", I(c.http_port)},
+        {"log_file", S(c.log_file)},
+        {"chart_window", [&](const std::string &v)
+         { c.window_ms = parseDuration(v); }},
+        {"hum_crit_low", D(c.hum_crit_low)},
+        {"hum_warning_low", D(c.hum_warning_low)},
+        {"hum_optimal_low", D(c.hum_optimal_low)},
+        {"hum_optimal_high", D(c.hum_optimal_high)},
+        {"hum_warning_high", D(c.hum_warning_high)},
+        {"hum_crit_high", D(c.hum_crit_high)},
+        {"temp_crit_low", D(c.temp_crit_low)},
+        {"temp_warning_low", D(c.temp_warning_low)},
+        {"temp_optimal_low", D(c.temp_optimal_low)},
+        {"temp_optimal_high", D(c.temp_optimal_high)},
+        {"temp_warning_high", D(c.temp_warning_high)},
+        {"temp_crit_high", D(c.temp_crit_high)},
+        {"fan_enabled", B(c.fan_enabled)},
+        {"fan_on_temp", D(c.fan_on_temp)},
+        {"fan_full_temp", D(c.fan_full_temp)},
+        {"fan_min_duty", I(c.fan_min_duty)},
+        {"fan_max_duty", I(c.fan_max_duty)},
+        {"fan_hysteresis", D(c.fan_hysteresis)},
+    };
+
     std::string line;
     while (std::getline(f, line))
     {
         std::string t = trim(line);
         if (t.empty() || t[0] == '#')
             continue;
-
         size_t eq = t.find('=');
         if (eq == std::string::npos)
             continue;
-
         std::string k = trim(t.substr(0, eq));
         std::string v = trim(t.substr(eq + 1));
 
-        if (k == "serial_port")
-            c.serial_port = v;
-        else if (k == "http_port")
-            c.http_port = std::stoi(v);
-        else if (k == "log_file")
-            c.log_file = v;
-        else if (k == "chart_window")
-            c.window_ms = parseDuration(v);
-        else if (k == "hum_crit_low")
-            c.hum_crit_low = std::stod(v);
-        else if (k == "hum_warning_low")
-            c.hum_warning_low = std::stod(v);
-        else if (k == "hum_optimal_low")
-            c.hum_optimal_low = std::stod(v);
-        else if (k == "hum_optimal_high")
-            c.hum_optimal_high = std::stod(v);
-        else if (k == "hum_warning_high")
-            c.hum_warning_high = std::stod(v);
-        else if (k == "hum_crit_high")
-            c.hum_crit_high = std::stod(v);
-        else if (k == "temp_crit_low")
-            c.temp_crit_low = std::stod(v);
-        else if (k == "temp_warning_low")
-            c.temp_warning_low = std::stod(v);
-        else if (k == "temp_optimal_low")
-            c.temp_optimal_low = std::stod(v);
-        else if (k == "temp_optimal_high")
-            c.temp_optimal_high = std::stod(v);
-        else if (k == "temp_warning_high")
-            c.temp_warning_high = std::stod(v);
-        else if (k == "temp_crit_high")
-            c.temp_crit_high = std::stod(v);
-        else if (k == "fan_enabled")
-            c.fan_enabled = (v == "1" || v == "true" || v == "yes" || v == "on");
-        else if (k == "fan_on_temp")
-            c.fan_on_temp = std::stod(v);
-        else if (k == "fan_full_temp")
-            c.fan_full_temp = std::stod(v);
-        else if (k == "fan_min_duty")
-            c.fan_min_duty = std::stoi(v);
-        else if (k == "fan_max_duty")
-            c.fan_max_duty = std::stoi(v);
-        else if (k == "fan_hysteresis")
-            c.fan_hysteresis = std::stod(v);
+        const Entry *found = nullptr;
+        for (const auto &e : handlers)
+            if (k == e.key)
+            {
+                found = &e;
+                break;
+            }
+
+        if (found)
+            found->fn(v);
+        else
+            std::cerr << "[config] unknown key: " << k << "\n";
     }
 
     std::cerr << "[config] loaded from " << path << "\n";
@@ -842,6 +867,7 @@ static std::string queryParam(const std::string &query, const std::string &key)
         size_t amp = query.find('&', pos);
         size_t len = (amp == std::string::npos) ? std::string::npos : amp - pos;
         std::string pair = query.substr(pos, len);
+
         if (pair.rfind(needle, 0) == 0)
             return pair.substr(needle.size());
         if (amp == std::string::npos)
@@ -873,6 +899,21 @@ static void httpLoop(DataStore &store, const Config &cfg,
     listen(sfd, 16);
     std::cerr << "[http] listening on http://0.0.0.0:" << cfg.http_port << "\n";
 
+    // read html to string
+    const std::string kDashboardHtml = readFileToString(cfg.hsrc);
+
+    auto intParam = [](const std::string &s, long long dflt) -> long long
+    {
+        try
+        {
+            return s.empty() ? dflt : std::stoll(s);
+        }
+        catch (...)
+        {
+            return dflt;
+        }
+    };
+
     while (running)
     {
         int cfd = ::accept(sfd, nullptr, nullptr);
@@ -881,6 +922,7 @@ static void httpLoop(DataStore &store, const Config &cfg,
 
         char req[2048];
         ssize_t n = ::read(cfd, req, sizeof(req) - 1);
+
         if (n <= 0)
         {
             ::close(cfd);
@@ -891,12 +933,12 @@ static void httpLoop(DataStore &store, const Config &cfg,
         std::string target = parseRequestPath(req);
         std::string path = target, query;
         size_t qm = target.find('?');
+
         if (qm != std::string::npos)
         {
             path = target.substr(0, qm);
             query = target.substr(qm + 1);
         }
-        std::string kDashboardHtml = readFileToString(cfg.hsrc);
 
         if (path == "/" || path == "/index.html")
             httpRespond(cfd, "200 OK", "text/html; charset=utf-8", kDashboardHtml);
@@ -910,22 +952,12 @@ static void httpLoop(DataStore &store, const Config &cfg,
             //   /api/fan?duty=N               -> shorthand for manual at N
             std::string mode = queryParam(query, "mode");
             std::string dutyStr = queryParam(query, "duty");
+
             if (mode == "auto")
                 store.setFanAuto();
             else if (mode == "manual" || !dutyStr.empty())
-            {
-                int duty = 0;
-                try
-                {
-                    if (!dutyStr.empty())
-                        duty = std::stoi(dutyStr);
-                }
-                catch (...)
-                {
-                    duty = 0;
-                }
-                store.setFanManual(duty);
-            }
+                store.setFanManual(static_cast<int>(intParam(dutyStr, 0)));
+
             httpRespond(cfd, "200 OK", "application/json", jsonLatest(store));
         }
         else if (path == "/api/history")
@@ -934,17 +966,17 @@ static void httpLoop(DataStore &store, const Config &cfg,
             // (epoch ms) serve an arbitrary range read back from the disk log.
             std::string fromS = queryParam(query, "from");
             std::string toS = queryParam(query, "to");
-            if (!fromS.empty() || !toS.empty())
+
+            if (fromS.empty() && toS.empty())
+                httpRespond(cfd, "200 OK", "application/json", jsonHistory(store.window()));
+            else
             {
-                long long from = 0, to = nowMs();
-                try { if (!fromS.empty()) from = std::stoll(fromS); } catch (...) {}
-                try { if (!toS.empty()) to = std::stoll(toS); } catch (...) {}
+                const long long from = intParam(fromS, 0);
+                const long long to = intParam(toS, nowMs());
+
                 httpRespond(cfd, "200 OK", "application/json",
                             jsonHistory(store.readRange(from, to, 2000)));
             }
-            else
-                httpRespond(cfd, "200 OK", "application/json",
-                            jsonHistory(store.window()));
         }
         else if (path == "/api/config")
             httpRespond(cfd, "200 OK", "application/json", jsonConfig(cfg));
@@ -979,5 +1011,6 @@ int main(int argc, char **argv)
 
     serial.join();
     http.join();
+
     return 0;
 }

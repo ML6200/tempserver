@@ -660,7 +660,8 @@ static bool parseLine(const std::string &line, double &h, double &t,
 }
 
 static void serialLoop(DataStore &store, const Config &cfg,
-                       std::string fixedPort, std::atomic<bool> &running)
+                       std::mutex &cfgMtx, std::string fixedPort,
+                       std::atomic<bool> &running)
 {
     std::string lineBuf;
 
@@ -721,13 +722,21 @@ static void serialLoop(DataStore &store, const Config &cfg,
                             // error (can't measure -> assume worst). We send
                             // every reading (not only on change) so the
                             // Arduino's watchdog stays fed.
+                            // Snapshot the fan config under the lock so a live
+                            // edit from the HTTP thread can't be read torn.
+                            Config snap;
+                            {
+                                std::lock_guard<std::mutex> lk(cfgMtx);
+                                snap = cfg;
+                            }
+
                             int duty;
                             if (store.fanManual())
                                 duty = store.fanOverrideDuty();
                             else if (st == Status::OK)
-                                duty = fanDutyForTemp(cfg, t, prevDuty);
+                                duty = fanDutyForTemp(snap, t, prevDuty);
                             else
-                                duty = cfg.fan_max_duty;
+                                duty = snap.fan_max_duty;
                             serialWrite(fd, "F" + std::to_string(duty) + "\n");
                             prevDuty = duty;
                             store.setFanDuty(duty);
@@ -865,6 +874,9 @@ static std::string jsonConfig(const Config &c)
        << ",\"fan_enabled\":" << (c.fan_enabled ? "true" : "false")
        << ",\"fan_on_temp\":" << c.fan_on_temp
        << ",\"fan_full_temp\":" << c.fan_full_temp
+       << ",\"fan_min_duty\":" << c.fan_min_duty
+       << ",\"fan_max_duty\":" << c.fan_max_duty
+       << ",\"fan_hysteresis\":" << c.fan_hysteresis
        << ",\"window_ms\":" << c.window_ms << "}";
     return os.str();
 }
@@ -907,6 +919,35 @@ static bool validThresholds(const Config &c, std::string &err)
                  c.temp_optimal_high, c.temp_warning_high, c.temp_crit_high))
     {
         err = "temperature thresholds out of order";
+        return false;
+    }
+    return true;
+}
+
+// Sanity-check the fan curve so a bad edit can't make the serial thread
+// compute a nonsensical duty. Duties are PWM (0-255); the ramp needs
+// on_temp < full_temp to have a positive span.
+static bool validFanConfig(const Config &c, std::string &err)
+{
+    if (c.fan_min_duty < 0 || c.fan_min_duty > 255 ||
+        c.fan_max_duty < 0 || c.fan_max_duty > 255)
+    {
+        err = "fan duties must be 0-255";
+        return false;
+    }
+    if (c.fan_min_duty > c.fan_max_duty)
+    {
+        err = "fan_min_duty must be <= fan_max_duty";
+        return false;
+    }
+    if (c.fan_on_temp >= c.fan_full_temp)
+    {
+        err = "fan_on_temp must be < fan_full_temp";
+        return false;
+    }
+    if (c.fan_hysteresis < 0)
+    {
+        err = "fan_hysteresis must be >= 0";
         return false;
     }
     return true;
@@ -1000,7 +1041,7 @@ static std::string queryParam(const std::string &query, const std::string &key)
     return "";
 }
 
-static void httpLoop(DataStore &store, Config &cfg,
+static void httpLoop(DataStore &store, Config &cfg, std::mutex &cfgMtx,
                      const std::string &cfgPath, std::atomic<bool> &running)
 {
     int sfd = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -1103,12 +1144,14 @@ static void httpLoop(DataStore &store, Config &cfg,
         }
         else if (path == "/api/config")
         {
-            // No params -> read config. With threshold params -> update them.
-            // Only the display threshold bands are editable here; those fields
-            // are read solely by this (single-threaded) accept loop, so no lock
-            // is needed against the serial thread, which only reads fan_* values.
+            // No params -> read config. With params -> update thresholds and/or
+            // the fan curve. The lock guards against the serial thread, which
+            // snapshots the fan_* fields to compute duty on every reading.
             if (query.empty())
+            {
+                std::lock_guard<std::mutex> lk(cfgMtx);
                 httpRespond(cfd, "200 OK", "application/json", jsonConfig(cfg));
+            }
             else
             {
                 auto dparam = [&](const char *k, double cur)
@@ -1125,44 +1168,72 @@ static void httpLoop(DataStore &store, Config &cfg,
                         return cur;
                     }
                 };
+                auto bparam = [&](const char *k, bool cur)
+                {
+                    std::string s = queryParam(query, k);
+                    if (s.empty())
+                        return cur;
+                    return s == "1" || s == "true" || s == "yes" || s == "on";
+                };
 
                 // Validate on a copy so a bad request leaves cfg untouched.
-                Config nc = cfg;
-                nc.hum_crit_low = dparam("hum_crit_low", cfg.hum_crit_low);
-                nc.hum_warning_low = dparam("hum_warning_low", cfg.hum_warning_low);
-                nc.hum_optimal_low = dparam("hum_optimal_low", cfg.hum_optimal_low);
-                nc.hum_optimal_high = dparam("hum_optimal_high", cfg.hum_optimal_high);
-                nc.hum_warning_high = dparam("hum_warning_high", cfg.hum_warning_high);
-                nc.hum_crit_high = dparam("hum_crit_high", cfg.hum_crit_high);
-                nc.temp_crit_low = dparam("temp_crit_low", cfg.temp_crit_low);
-                nc.temp_warning_low = dparam("temp_warning_low", cfg.temp_warning_low);
-                nc.temp_optimal_low = dparam("temp_optimal_low", cfg.temp_optimal_low);
-                nc.temp_optimal_high = dparam("temp_optimal_high", cfg.temp_optimal_high);
-                nc.temp_warning_high = dparam("temp_warning_high", cfg.temp_warning_high);
-                nc.temp_crit_high = dparam("temp_crit_high", cfg.temp_crit_high);
+                Config nc;
+                {
+                    std::lock_guard<std::mutex> lk(cfgMtx);
+                    nc = cfg;
+                }
+                nc.hum_crit_low = dparam("hum_crit_low", nc.hum_crit_low);
+                nc.hum_warning_low = dparam("hum_warning_low", nc.hum_warning_low);
+                nc.hum_optimal_low = dparam("hum_optimal_low", nc.hum_optimal_low);
+                nc.hum_optimal_high = dparam("hum_optimal_high", nc.hum_optimal_high);
+                nc.hum_warning_high = dparam("hum_warning_high", nc.hum_warning_high);
+                nc.hum_crit_high = dparam("hum_crit_high", nc.hum_crit_high);
+                nc.temp_crit_low = dparam("temp_crit_low", nc.temp_crit_low);
+                nc.temp_warning_low = dparam("temp_warning_low", nc.temp_warning_low);
+                nc.temp_optimal_low = dparam("temp_optimal_low", nc.temp_optimal_low);
+                nc.temp_optimal_high = dparam("temp_optimal_high", nc.temp_optimal_high);
+                nc.temp_warning_high = dparam("temp_warning_high", nc.temp_warning_high);
+                nc.temp_crit_high = dparam("temp_crit_high", nc.temp_crit_high);
+                nc.fan_enabled = bparam("fan_enabled", nc.fan_enabled);
+                nc.fan_on_temp = dparam("fan_on_temp", nc.fan_on_temp);
+                nc.fan_full_temp = dparam("fan_full_temp", nc.fan_full_temp);
+                nc.fan_min_duty =
+                    static_cast<int>(dparam("fan_min_duty", nc.fan_min_duty));
+                nc.fan_max_duty =
+                    static_cast<int>(dparam("fan_max_duty", nc.fan_max_duty));
+                nc.fan_hysteresis = dparam("fan_hysteresis", nc.fan_hysteresis);
 
                 std::string err;
-                if (!validThresholds(nc, err))
+                if (!validThresholds(nc, err) || !validFanConfig(nc, err))
                     httpRespond(cfd, "400 Bad Request", "application/json",
                                 "{\"status\":\"fail\",\"error\":\"" + err + "\"}");
                 else
                 {
-                    cfg = nc;
+                    {
+                        std::lock_guard<std::mutex> lk(cfgMtx);
+                        cfg = nc;
+                    }
                     updateConfigFile(
                         cfgPath,
-                        {{"hum_crit_low", fmtNum(cfg.hum_crit_low)},
-                         {"hum_warning_low", fmtNum(cfg.hum_warning_low)},
-                         {"hum_optimal_low", fmtNum(cfg.hum_optimal_low)},
-                         {"hum_optimal_high", fmtNum(cfg.hum_optimal_high)},
-                         {"hum_warning_high", fmtNum(cfg.hum_warning_high)},
-                         {"hum_crit_high", fmtNum(cfg.hum_crit_high)},
-                         {"temp_crit_low", fmtNum(cfg.temp_crit_low)},
-                         {"temp_warning_low", fmtNum(cfg.temp_warning_low)},
-                         {"temp_optimal_low", fmtNum(cfg.temp_optimal_low)},
-                         {"temp_optimal_high", fmtNum(cfg.temp_optimal_high)},
-                         {"temp_warning_high", fmtNum(cfg.temp_warning_high)},
-                         {"temp_crit_high", fmtNum(cfg.temp_crit_high)}});
-                    httpRespond(cfd, "200 OK", "application/json", jsonConfig(cfg));
+                        {{"hum_crit_low", fmtNum(nc.hum_crit_low)},
+                         {"hum_warning_low", fmtNum(nc.hum_warning_low)},
+                         {"hum_optimal_low", fmtNum(nc.hum_optimal_low)},
+                         {"hum_optimal_high", fmtNum(nc.hum_optimal_high)},
+                         {"hum_warning_high", fmtNum(nc.hum_warning_high)},
+                         {"hum_crit_high", fmtNum(nc.hum_crit_high)},
+                         {"temp_crit_low", fmtNum(nc.temp_crit_low)},
+                         {"temp_warning_low", fmtNum(nc.temp_warning_low)},
+                         {"temp_optimal_low", fmtNum(nc.temp_optimal_low)},
+                         {"temp_optimal_high", fmtNum(nc.temp_optimal_high)},
+                         {"temp_warning_high", fmtNum(nc.temp_warning_high)},
+                         {"temp_crit_high", fmtNum(nc.temp_crit_high)},
+                         {"fan_enabled", nc.fan_enabled ? "true" : "false"},
+                         {"fan_on_temp", fmtNum(nc.fan_on_temp)},
+                         {"fan_full_temp", fmtNum(nc.fan_full_temp)},
+                         {"fan_min_duty", std::to_string(nc.fan_min_duty)},
+                         {"fan_max_duty", std::to_string(nc.fan_max_duty)},
+                         {"fan_hysteresis", fmtNum(nc.fan_hysteresis)}});
+                    httpRespond(cfd, "200 OK", "application/json", jsonConfig(nc));
                 }
             }
         }
@@ -1211,11 +1282,12 @@ int main(int argc, char **argv)
 
     DataStore store(cfg.log_file, cfg.window_ms);
     std::atomic<bool> running{true};
+    std::mutex cfgMtx; // guards live edits to cfg shared by both threads
 
     std::thread serial(serialLoop, std::ref(store), std::ref(cfg),
-                       cfg.serial_port, std::ref(running));
-    std::thread http(httpLoop, std::ref(store), std::ref(cfg), std::cref(cfgPath),
-                     std::ref(running));
+                       std::ref(cfgMtx), cfg.serial_port, std::ref(running));
+    std::thread http(httpLoop, std::ref(store), std::ref(cfg), std::ref(cfgMtx),
+                     std::cref(cfgPath), std::ref(running));
 
     serial.join();
     http.join();
